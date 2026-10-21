@@ -98,7 +98,7 @@ namespace
     bool pending = false;
     ULONGLONG failedAt = 0;
     ULONGLONG used = 0;
-    std::vector<uint8_t> strength;           // radar: rain strength, 64 x 64 (for working out the motion)
+    std::vector<uint8_t> strength;           // for working out the motion: radar 64 x 64, clouds 128 x 128
   };
   std::unordered_map<uint64_t, Tile> tiles;   // key: layer, z, x, y
   int radarEpoch = 0;                         // bumped when new radar pictures arrive (old tiles are dropped)
@@ -328,6 +328,7 @@ namespace
   }
 
   void dropMotion();                       // (below)
+  void dropMotion(int which);
 
   void dropRadarTiles()
   {
@@ -413,19 +414,23 @@ namespace
       if (r.status == 0 && r.pixels.empty()) return;          // (dropped from the queue: asked again if still needed)
       if (!r.ok() || r.pixels.empty() || !target) { t.failedAt = GetTickCount64(); return; }
       D2D1_BITMAP_PROPERTIES props = D2D1::BitmapProperties(D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
-      if (layer >= 1 && layer <= FrameCount && r.width == 256 && r.height == 256) {
-        // rain strength, roughly: none where the tile is clear, more the redder
-        // it is (light rain is blue-green, heavy yellow to red); 4 x 4 pixels a cell
-        t.strength.assign(64 * 64, 0);
-        for (int cy = 0; cy < 64; ++cy)
-          for (int cx = 0; cx < 64; ++cx) {
+      if (layer >= 1 && r.width == 256 && r.height == 256) {
+        // what the motion is worked out from.  Radar: rain strength, roughly -
+        // none where the tile is clear, more the redder it is (light rain is
+        // blue-green, heavy yellow to red); 4 x 4 pixels a cell.  Clouds: how
+        // solid they are; 2 x 2 pixels a cell (the satellite's pixels are coarser).
+        const bool clouds = isSatLayer(layer);
+        const int side = clouds ? 128 : 64, k = 256 / side;
+        t.strength.assign((size_t) side * side, 0);
+        for (int cy = 0; cy < side; ++cy)
+          for (int cx = 0; cx < side; ++cx) {
             int sum = 0;
-            for (int j = 0; j < 4; ++j)
-              for (int i = 0; i < 4; ++i) {
-                const uint8_t * q = &r.pixels[((size_t) (cy * 4 + j) * 256 + cx * 4 + i) * 4];
-                sum += (q[3] + q[2]) / 2;          // (alpha + premultiplied red)
+            for (int j = 0; j < k; ++j)
+              for (int i = 0; i < k; ++i) {
+                const uint8_t * q = &r.pixels[((size_t) (cy * k + j) * 256 + cx * k + i) * 4];
+                sum += clouds ? q[3] : (q[3] + q[2]) / 2;          // (alpha + premultiplied red)
               }
-            t.strength[cy * 64 + cx] = (uint8_t) (sum / 16);
+            t.strength[(size_t) cy * side + cx] = (uint8_t) (sum / (k * k));
           }
       }
       if (SUCCEEDED(target->CreateBitmap(D2D1::SizeU(r.width, r.height), r.pixels.data(), r.width * 4, props, &t.bitmap)))
@@ -592,22 +597,27 @@ namespace
     picture->Release();
   }
 
-  // ------------------------------------------------------------- radar motion
+  // ------------------------------------------------------------- weather motion
   // Between two radar pictures 5 minutes apart, the rain is drawn where it
   // was on its way: the earlier picture slid forward along the storms'
   // motion, the later one slid back, and the two blended - true in-between
-  // pictures, not a cross-fade.
+  // pictures, not a cross-fade.  The clouds move the same way, with a motion
+  // of their own (they ride the winds higher up, often faster and in another
+  // direction than the storms below).
   //
-  // The motion: the view is cut into cells of about 2 km; each radar frame
-  // becomes a grid of rain strength (from the tiles' strength copies); for each
-  // block of 6 x 6 cells with rain in it, the shift that best matches it in
-  // the next frame is found (all 23 pairs of the loop), and those shifts,
-  // weighted by how much rain they rest on, are averaged into one motion
-  // field for the view (storms drift with the steering winds, so the loop's
-  // average is steadier than any one pair).  Blocks without rain take their
-  // neighbors' motion.  It is worked out on a thread when the view has been
-  // still for a moment and every frame is here, again after a pan, a zoom
-  // or new pictures; until then the frames cross-fade.
+  // The motion: the view is cut into cells (about 2 km for the radar, 4 km
+  // for the clouds, whose satellite pixels are coarser); each frame becomes
+  // a grid of strength (from the tiles' strength copies); for each block of
+  // 6 x 6 cells with something in it, the shift that best matches it in the
+  // next frame is found (all the loop's pairs), and those shifts, weighted by
+  // how much they rest on, are averaged into one motion field for the view
+  // (weather drifts with the steering winds, so the loop's average is
+  // steadier than any one pair).  Rain blocks are weighted by their rain;
+  // cloud blocks by their edges (an even overcast has nothing to follow), and
+  // their shifts are refined to a fraction of a cell.  Blocks with nothing
+  // take their neighbors' motion.  It is worked out on a thread when the view
+  // has been still for a moment and every frame is here, again after a pan,
+  // a zoom or new pictures; until then the frames cross-fade (the clouds step).
   //
   // The drawing (Direct2D effects, on the graphics card): the field becomes
   // a small picture (red = x, green = y), scaled up to the view, and drives
@@ -621,8 +631,11 @@ namespace
   };
   View currentView() { View v; v.camX = camX; v.camY = camY; v.zoom = zoom; v.w = (UINT32) mapWidth(); v.h = (UINT32) mapHeight(); return v; }
 
+  enum { RadarMotion = 0, CloudMotion = 1 };
+
   struct MotionField
   {
+    int which = RadarMotion;
     View view;
     int bw = 0, bh = 0;                    // blocks across, down
     float blockPx = 0;                     // a block's size on screen
@@ -632,36 +645,81 @@ namespace
 
   struct MotionInput
   {
+    int which = RadarMotion;
     int job = 0;
     View view;
     int gw = 0, gh = 0, reach = 0;         // cells across, down; the farthest move looked for, in cells
     float cellPx = 0;
     std::vector<std::vector<uint8_t>> frames;
+    std::vector<char> pairs;               // pairs[f]: frames f and f + 1 can be compared
   };
 
-  MotionField motion;                      // in use (vx empty: none)
-  ID2D1Bitmap * motionMap = nullptr;       // the field as a picture
-  int motionJob = 0;                       // the newest computation (older answers are ignored)
-  bool motionRunning = false;
+  // One weather layer's motion, and what draws it moving
+  struct Mover
+  {
+    MotionField field;                     // in use (vx empty: none)
+    ID2D1Bitmap * map = nullptr;           // the field as a picture
+    int job = 0;                           // the newest computation (older answers are ignored)
+    bool running = false;
+    ID2D1BitmapRenderTarget * layerA = nullptr, * layerB = nullptr;
+    ID2D1Effect * fxScale = nullptr, * fxMoveA = nullptr, * fxMoveB = nullptr, * fxMix = nullptr, * fxBlur = nullptr;
+  };
+  Mover movers[2];                         // RadarMotion, CloudMotion
+  int motionJobs = 0;
   View lastView;
   ULONGLONG viewSteadySince = 0;
-  ID2D1BitmapRenderTarget * weatherLayer2 = nullptr;
-  ID2D1Effect * fxScale = nullptr, * fxMoveA = nullptr, * fxMoveB = nullptr, * fxMix = nullptr;
+
+  bool motionReady(int which)
+  {
+    const Mover & m = movers[which];
+    return !m.field.vx.empty() && m.map && m.field.view == currentView();
+  }
+
+  void dropMotion(int which)
+  {
+    Mover & m = movers[which];
+    m.field.vx.clear();
+    m.field.vy.clear();
+    if (m.map) { m.map->Release(); m.map = nullptr; }
+    m.job = ++motionJobs;
+    m.running = false;
+  }
 
   void dropMotion()
   {
-    motion.vx.clear();
-    motion.vy.clear();
-    if (motionMap) { motionMap->Release(); motionMap = nullptr; }
-    ++motionJob;
-    motionRunning = false;
+    dropMotion(RadarMotion);
+    dropMotion(CloudMotion);
   }
 
-  // A radar frame as a grid of rain strength (0..255), cells cellPx square.
-  std::vector<uint8_t> radarGrid(int f, float cellPx, int gw, int gh)
+  void releaseMovers()
+  {
+    for (Mover & m : movers) {
+      for (ID2D1Effect ** fx : { &m.fxScale, &m.fxMoveA, &m.fxMoveB, &m.fxMix, &m.fxBlur })
+        if (*fx) { (*fx)->Release(); *fx = nullptr; }
+      if (m.layerA) { m.layerA->Release(); m.layerA = nullptr; }
+      if (m.layerB) { m.layerB->Release(); m.layerB = nullptr; }
+    }
+    dropMotion();
+  }
+
+  // Can the clouds move from frame f to f + 1: two satellite pictures about 5 minutes apart?
+  bool cloudPair(int f)
+  {
+    if (f < 0 || f + 1 >= FrameCount || satFrame[f].empty() || satFrame[f + 1].empty()) return false;
+    FILETIME a, b;
+    if (!parseIso(satFrame[f], a) || !parseIso(satFrame[f + 1], b)) return false;
+    ULARGE_INTEGER ua, ub;
+    ua.LowPart = a.dwLowDateTime; ua.HighPart = a.dwHighDateTime;
+    ub.LowPart = b.dwLowDateTime; ub.HighPart = b.dwHighDateTime;
+    const double minutes = (double) ((LONGLONG) ub.QuadPart - (LONGLONG) ua.QuadPart) / 6e8;
+    return minutes > 3 && minutes < 7;
+  }
+
+  // A frame of a layer as a grid of strength (0..255: rain, or cloud), cells cellPx square.
+  std::vector<uint8_t> strengthGrid(int layer, int maxZoom, float cellPx, int gw, int gh)
   {
     std::vector<uint8_t> grid((size_t) gw * gh, 0);
-    const int z = levelFor(RadarMaxZoom), n = 1 << z;
+    const int z = levelFor(maxZoom), n = 1 << z;
     const double tileWorld = 256.0 / n;
     for (int j = 0; j < gh; ++j)
       for (int i = 0; i < gw; ++i) {
@@ -669,11 +727,12 @@ namespace
         toWorld((i + 0.5f) * cellPx, (j + 0.5f) * cellPx, wx, wy);
         const int tx = (int) floor(wx / tileWorld), ty = (int) floor(wy / tileWorld);
         if (ty < 0 || ty >= n) continue;
-        auto it = tiles.find(tileKey(radarLayer(f), z, ((tx % n) + n) % n, ty));
+        auto it = tiles.find(tileKey(layer, z, ((tx % n) + n) % n, ty));
         if (it == tiles.end() || it->second.strength.empty()) continue;
-        const int px = std::min(63, std::max(0, (int) ((wx / tileWorld - tx) * 64)));
-        const int py = std::min(63, std::max(0, (int) ((wy / tileWorld - ty) * 64)));
-        grid[(size_t) j * gw + i] = it->second.strength[py * 64 + px];
+        const int side = it->second.strength.size() == 128 * 128 ? 128 : 64;
+        const int px = std::min(side - 1, std::max(0, (int) ((wx / tileWorld - tx) * side)));
+        const int py = std::min(side - 1, std::max(0, (int) ((wy / tileWorld - ty) * side)));
+        grid[(size_t) j * gw + i] = it->second.strength[(size_t) py * side + px];
       }
     return grid;
   }
@@ -681,6 +740,7 @@ namespace
   // (on a thread: only its input)
   MotionField * workOutMotion(const MotionInput & in)
   {
+    const bool clouds = in.which == CloudMotion;
     const int B = 6, S = 3, R = in.reach;
     const int bw = in.gw / S + 2, bh = in.gh / S + 2;          // (one more each way: the edges)
     std::vector<double> sx((size_t) bw * bh, 0), sy(sx.size(), 0), sw(sx.size(), 0);
@@ -688,30 +748,59 @@ namespace
       return (x < 0 || y < 0 || x >= in.gw || y >= in.gh) ? 0 : g[(size_t) y * in.gw + x];
     };
     for (size_t f = 0; f + 1 < in.frames.size(); ++f) {
+      if (!in.pairs[f]) continue;
       const std::vector<uint8_t> & A = in.frames[f], & Bn = in.frames[f + 1];
       for (int bj = 0; bj < bh; ++bj)
         for (int bi = 0; bi < bw; ++bi) {
           const int x0 = bi * S - 1, y0 = bj * S - 1;             // the block: 6 x 6 cells around its own 3 x 3
           int signal = 0;
-          for (int j = 0; j < B; ++j)
-            for (int i = 0; i < B; ++i) signal += cell(A, x0 + i, y0 + j);
-          if (signal < B * B * 40) continue;                       // (too little rain to follow)
+          if (clouds) {
+            // the clouds' edges and texture: what can be followed
+            for (int j = 0; j < B; ++j)
+              for (int i = 0; i < B; ++i) {
+                const int c = cell(A, x0 + i, y0 + j);
+                signal += abs(cell(A, x0 + i + 1, y0 + j) - c) + abs(cell(A, x0 + i, y0 + j + 1) - c);
+              }
+            if (signal < B * B * 12) continue;
+          }
+          else {
+            for (int j = 0; j < B; ++j)
+              for (int i = 0; i < B; ++i) signal += cell(A, x0 + i, y0 + j);
+            if (signal < B * B * 40) continue;                     // (too little rain to follow)
+          }
+          auto sad = [&](int dx, int dy, int stop) {
+            int s = 0;
+            for (int j = 0; j < B && s < stop; ++j)
+              for (int i = 0; i < B; ++i)
+                s += abs(cell(A, x0 + i, y0 + j) - cell(Bn, x0 + i + dx, y0 + j + dy));
+            return s;
+          };
           int best = INT_MAX, bx = 0, by = 0;
           for (int dy = -R; dy <= R; ++dy)
             for (int dx = -R; dx <= R; ++dx) {
-              int sad = (abs(dx) + abs(dy)) * 8;                   // (all else equal, the shorter move)
-              for (int j = 0; j < B && sad < best; ++j)
-                for (int i = 0; i < B; ++i)
-                  sad += abs(cell(A, x0 + i, y0 + j) - cell(Bn, x0 + i + dx, y0 + j + dy));
-              if (sad < best) { best = sad; bx = dx; by = dy; }
+              const int bias = (abs(dx) + abs(dy)) * 8;            // (all else equal, the shorter move)
+              const int s = bias + sad(dx, dy, best - bias);
+              if (s < best) { best = s; bx = dx; by = dy; }
             }
+          float fx = (float) bx, fy = (float) by;
+          if (clouds) {
+            // to a fraction of a cell: the bottom of a parabola through the best and its neighbors
+            auto refine = [](int l, int c, int r) {
+              const int d = l - 2 * c + r;
+              return d > 0 ? std::max(-0.5f, std::min(0.5f, 0.5f * (l - r) / d)) : 0.0f;
+            };
+            const int c = sad(bx, by, INT_MAX);
+            if (abs(bx) < R) fx += refine(sad(bx - 1, by, INT_MAX), c, sad(bx + 1, by, INT_MAX));
+            if (abs(by) < R) fy += refine(sad(bx, by - 1, INT_MAX), c, sad(bx, by + 1, INT_MAX));
+          }
           const size_t k = (size_t) bj * bw + bi;
-          sx[k] += (double) signal * bx;
-          sy[k] += (double) signal * by;
+          sx[k] += (double) signal * fx;
+          sy[k] += (double) signal * fy;
           sw[k] += signal;
         }
     }
     MotionField * m = new MotionField;
+    m->which = in.which;
     m->view = in.view;
     m->bw = bw;
     m->bh = bh;
@@ -721,7 +810,7 @@ namespace
     std::vector<char> known((size_t) bw * bh, 0);
     for (size_t k = 0; k < known.size(); ++k)
       if (sw[k] > 0) { m->vx[k] = (float) (sx[k] / sw[k]); m->vy[k] = (float) (sy[k] / sw[k]); known[k] = 1; }
-    // blocks without rain: their neighbors' motion, spreading out
+    // blocks with nothing to follow: their neighbors' motion, spreading out
     for (int pass = 0; pass < 64; ++pass) {
       bool any = false;
       std::vector<char> now = known;
@@ -777,21 +866,39 @@ namespace
     return true;
   }
 
-  void startMotion()
+  bool cloudsLoaded()
   {
-    // cells of about 2 km (6 to 40 screen pixels); moves up to 10 km in 5 minutes (75 mph)
+    for (int f = 0; f < FrameCount; ++f)
+      if (!satFrame[f].empty() && !layerLoaded(satLayer(f), SatMaxZoom)) return false;
+    return true;
+  }
+
+  void startMotion(int which)
+  {
+    // radar: cells of about 2 km (6 to 40 screen pixels), moves up to 10 km in 5 minutes (75 mph);
+    // clouds: cells of about 4 km (8 to 40 pixels), moves up to 25 km in 5 minutes (the jet stream, 185 mph)
+    const bool clouds = which == CloudMotion;
     const double pxPerKm = scale() / (40075.0 * cos(latOf(camY) * Pi / 180) / 256.0);
     MotionInput in;
-    in.cellPx = (float) std::max(6.0, std::min(40.0, 2.0 * pxPerKm));
-    in.reach = std::max(2, std::min(8, (int) ceil(10.0 / (in.cellPx / pxPerKm))));
+    in.which = which;
+    in.cellPx = (float) std::max(clouds ? 8.0 : 6.0, std::min(40.0, (clouds ? 4.0 : 2.0) * pxPerKm));
+    in.reach = std::max(2, std::min(8, (int) ceil((clouds ? 25.0 : 10.0) / (in.cellPx / pxPerKm))));
     in.view = currentView();
     in.gw = (int) ceil(in.view.w / in.cellPx);
     in.gh = (int) ceil(in.view.h / in.cellPx);
     if (in.gw < 8 || in.gh < 8) return;                         // (zoomed in too far to tell)
-    for (int f = 0; f < FrameCount; ++f)
-      in.frames.push_back(radarGrid(f, in.cellPx, in.gw, in.gh));
-    in.job = ++motionJob;
-    motionRunning = true;
+    bool anyPair = false;
+    for (int f = 0; f < FrameCount; ++f) {
+      in.frames.push_back(clouds && satFrame[f].empty() ? std::vector<uint8_t>()
+                          : strengthGrid(clouds ? satLayer(f) : radarLayer(f), clouds ? SatMaxZoom : RadarMaxZoom, in.cellPx, in.gw, in.gh));
+      const bool pair = f + 1 < FrameCount && (!clouds || cloudPair(f));
+      in.pairs.push_back(pair);
+      anyPair |= pair;
+    }
+    if (!anyPair) return;
+    Mover & mv = movers[which];
+    in.job = mv.job = ++motionJobs;
+    mv.running = true;
     HWND w = window;
     std::thread([w, in]() {
       MotionField * m = workOutMotion(in);
@@ -802,8 +909,9 @@ namespace
   // The answer from the thread: kept if it is the newest and the view hasn't moved since.
   void motionArrived(int job, MotionField * m)
   {
-    if (job == motionJob) {
-      motionRunning = false;
+    Mover & mv = movers[m->which];
+    if (job == mv.job) {
+      mv.running = false;
       if (target && m->view == currentView()) {
         std::vector<uint8_t> px((size_t) m->bw * m->bh * 4);
         for (size_t k = 0; k < m->vx.size(); ++k) {
@@ -812,9 +920,9 @@ namespace
           px[k * 4 + 3] = 255;
         }
         D2D1_BITMAP_PROPERTIES props = D2D1::BitmapProperties(D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
-        if (motionMap) { motionMap->Release(); motionMap = nullptr; }
-        if (SUCCEEDED(target->CreateBitmap(D2D1::SizeU(m->bw, m->bh), px.data(), m->bw * 4, props, &motionMap)))
-          motion = *m;
+        if (mv.map) { mv.map->Release(); mv.map = nullptr; }
+        if (SUCCEEDED(target->CreateBitmap(D2D1::SizeU(m->bw, m->bh), px.data(), m->bw * 4, props, &mv.map)))
+          mv.field = *m;
       }
     }
     delete m;
@@ -832,66 +940,68 @@ namespace
     return layer != nullptr;
   }
 
-  // The radar between frames fa and fb, t of the way (0..1), moved along the
-  // motion field.  False if it can't be (then the caller cross-fades).
-  bool drawRadarMoving(int fa, int fb, float t, float opacity)
+  // A weather layer between pictures layerA and layerB, t of the way (0..1),
+  // moved along its motion field.  False if it can't be (then the caller
+  // cross-fades or steps).
+  bool drawMoving(int which, int layerA, int layerB, int maxZoom, float t, float opacity)
   {
-    if (!context || motion.vx.empty() || !motionMap || !(motion.view == currentView())) return false;
-    if (!ensureLayer(weatherLayer) || !ensureLayer(weatherLayer2)) return false;
+    Mover & mv = movers[which];
+    if (!context || !motionReady(which)) return false;
+    if (!ensureLayer(mv.layerA) || !ensureLayer(mv.layerB)) return false;
     auto make = [](REFCLSID id, ID2D1Effect *& fx) { if (!fx && FAILED(context->CreateEffect(id, &fx))) fx = nullptr; return fx != nullptr; };
-    if (!make(CLSID_D2D1Scale, fxScale) || !make(CLSID_D2D1DisplacementMap, fxMoveA) || !make(CLSID_D2D1DisplacementMap, fxMoveB) ||
-        !make(CLSID_D2D1ArithmeticComposite, fxMix) || !make(CLSID_D2D1GaussianBlur, blur))
+    if (!make(CLSID_D2D1Scale, mv.fxScale) || !make(CLSID_D2D1DisplacementMap, mv.fxMoveA) || !make(CLSID_D2D1DisplacementMap, mv.fxMoveB) ||
+        !make(CLSID_D2D1ArithmeticComposite, mv.fxMix) || !make(CLSID_D2D1GaussianBlur, mv.fxBlur))
       return false;
 
     ID2D1Bitmap * a = nullptr, * b = nullptr;
-    weatherLayer->BeginDraw();
-    weatherLayer->Clear(D2D1::ColorF(0, 0, 0, 0));
-    drawLayer(radarLayer(fa), RadarMaxZoom, 1.0f, weatherLayer);
-    weatherLayer2->BeginDraw();
-    weatherLayer2->Clear(D2D1::ColorF(0, 0, 0, 0));
-    drawLayer(radarLayer(fb), RadarMaxZoom, 1.0f, weatherLayer2);
-    const bool drawn = SUCCEEDED(weatherLayer->EndDraw()) & SUCCEEDED(weatherLayer2->EndDraw());
-    if (!drawn || FAILED(weatherLayer->GetBitmap(&a)) || FAILED(weatherLayer2->GetBitmap(&b))) {
+    mv.layerA->BeginDraw();
+    mv.layerA->Clear(D2D1::ColorF(0, 0, 0, 0));
+    drawLayer(layerA, maxZoom, 1.0f, mv.layerA);
+    mv.layerB->BeginDraw();
+    mv.layerB->Clear(D2D1::ColorF(0, 0, 0, 0));
+    drawLayer(layerB, maxZoom, 1.0f, mv.layerB);
+    const bool drawn = SUCCEEDED(mv.layerA->EndDraw()) & SUCCEEDED(mv.layerB->EndDraw());
+    if (!drawn || FAILED(mv.layerA->GetBitmap(&a)) || FAILED(mv.layerB->GetBitmap(&b))) {
       if (a) a->Release();
       return false;
     }
 
     // the field, from its small picture up to the view (holding its edges)
-    fxScale->SetInput(0, motionMap);
-    fxScale->SetValue(D2D1_SCALE_PROP_SCALE, D2D1::Vector2F(motion.blockPx, motion.blockPx));
-    fxScale->SetValue(D2D1_SCALE_PROP_INTERPOLATION_MODE, D2D1_SCALE_INTERPOLATION_MODE_LINEAR);
-    fxScale->SetValue(D2D1_SCALE_PROP_BORDER_MODE, D2D1_BORDER_MODE_HARD);
+    mv.fxScale->SetInput(0, mv.map);
+    mv.fxScale->SetValue(D2D1_SCALE_PROP_SCALE, D2D1::Vector2F(mv.field.blockPx, mv.field.blockPx));
+    mv.fxScale->SetValue(D2D1_SCALE_PROP_INTERPOLATION_MODE, D2D1_SCALE_INTERPOLATION_MODE_LINEAR);
+    mv.fxScale->SetValue(D2D1_SCALE_PROP_BORDER_MODE, D2D1_BORDER_MODE_HARD);
     // A moved forward t of the way (shown at p: A at p - t v), B moved back (B at p + (1 - t) v)
-    const float span = 2 * motion.vmax;
+    const float span = 2 * mv.field.vmax;
     auto setMove = [&](ID2D1Effect * fx, ID2D1Bitmap * picture, float amount) {
       fx->SetInput(0, picture);
-      fx->SetInputEffect(1, fxScale);
+      fx->SetInputEffect(1, mv.fxScale);
       fx->SetValue(D2D1_DISPLACEMENTMAP_PROP_SCALE, amount);
       fx->SetValue(D2D1_DISPLACEMENTMAP_PROP_X_CHANNEL_SELECT, D2D1_CHANNEL_SELECTOR_R);
       fx->SetValue(D2D1_DISPLACEMENTMAP_PROP_Y_CHANNEL_SELECT, D2D1_CHANNEL_SELECTOR_G);
     };
-    setMove(fxMoveA, a, -t * span);
-    setMove(fxMoveB, b, (1 - t) * span);
+    setMove(mv.fxMoveA, a, -t * span);
+    setMove(mv.fxMoveB, b, (1 - t) * span);
     // (1 - t) A + t B
-    fxMix->SetInputEffect(0, fxMoveA);
-    fxMix->SetInputEffect(1, fxMoveB);
-    fxMix->SetValue(D2D1_ARITHMETICCOMPOSITE_PROP_COEFFICIENTS, D2D1::Vector4F(0, 1 - t, t, 0));
+    mv.fxMix->SetInputEffect(0, mv.fxMoveA);
+    mv.fxMix->SetInputEffect(1, mv.fxMoveB);
+    mv.fxMix->SetValue(D2D1_ARITHMETICCOMPOSITE_PROP_COEFFICIENTS, D2D1::Vector4F(0, 1 - t, t, 0));
 
-    const float cell = (float) pow(2.0, zoom + log2(ui) - levelFor(RadarMaxZoom));
+    const float cell = (float) pow(2.0, zoom + log2(ui) - levelFor(maxZoom));
     context->PushLayer(D2D1::LayerParameters1(D2D1::InfiniteRect(), nullptr, D2D1_ANTIALIAS_MODE_ALIASED,
                                               D2D1::IdentityMatrix(), opacity), nullptr);
     if (cell >= 1.6f) {
-      blur->SetInputEffect(0, fxMix);
-      blur->SetValue(D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION, 0.32f * cell);
-      blur->SetValue(D2D1_GAUSSIANBLUR_PROP_BORDER_MODE, D2D1_BORDER_MODE_SOFT);
-      context->DrawImage(blur);
-      blur->SetInput(0, nullptr);
+      mv.fxBlur->SetInputEffect(0, mv.fxMix);
+      mv.fxBlur->SetValue(D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION, 0.32f * cell);
+      mv.fxBlur->SetValue(D2D1_GAUSSIANBLUR_PROP_BORDER_MODE, D2D1_BORDER_MODE_SOFT);
+      context->DrawImage(mv.fxBlur);
+      mv.fxBlur->SetInput(0, nullptr);
     }
     else
-      context->DrawImage(fxMix);
+      context->DrawImage(mv.fxMix);
     context->PopLayer();
-    fxMoveA->SetInput(0, nullptr);
-    fxMoveB->SetInput(0, nullptr);
+    mv.fxMoveA->SetInput(0, nullptr);
+    mv.fxMoveB->SetInput(0, nullptr);
     a->Release();
     b->Release();
     return true;
@@ -939,6 +1049,7 @@ namespace
       if (best != satFrame[f]) { satFrame[f] = best; changed = true; }
     }
     if (changed) {
+      dropMotion(CloudMotion);
       for (auto it = tiles.begin(); it != tiles.end();) {
         if (isSatLayer((int) (it->first >> 56))) { dropTile(it->second); it = tiles.erase(it); }
         else ++it;
@@ -1146,7 +1257,7 @@ namespace
                       : L"Radar " + clockTime(addMinutes(radarValidTime, -(FrameCount - 1 - frame) * 5));
     text(when, fontBold, D2D1::RectF(bx + 10 * ui, by + 6 * ui, bx + bw, by + 30 * ui), 0xFFFFFF);
     std::wstring state = playing ? L"▶  playing  (Space)" : L"❚❚  paused  (Space, ← →)";
-    if (showRadar && !motion.vx.empty() && motion.view == currentView()) state += L"   • smooth motion";
+    if ((showRadar && motionReady(RadarMotion)) || (showClouds && motionReady(CloudMotion))) state += L"   • smooth motion";
     text(state, fontSmall, D2D1::RectF(bx + 10 * ui, by + 28 * ui, bx + bw, by + 46 * ui), 0xC8D6E5);
     // the loop's frames, as a row of ticks
     float tx = bx + 10 * ui, tw = (bw - 20 * ui) / FrameCount;
@@ -1329,10 +1440,7 @@ namespace
     dropAllTiles();
     if (brush) { brush->Release(); brush = nullptr; }
     if (blur) { blur->Release(); blur = nullptr; }
-    for (ID2D1Effect ** fx : { &fxScale, &fxMoveA, &fxMoveB, &fxMix })
-      if (*fx) { (*fx)->Release(); *fx = nullptr; }
-    if (weatherLayer2) { weatherLayer2->Release(); weatherLayer2 = nullptr; }
-    dropMotion();
+    releaseMovers();
     if (weatherLayer) { weatherLayer->Release(); weatherLayer = nullptr; }
     if (context) { context->Release(); context = nullptr; }
     if (target) { target->Release(); target = nullptr; }
@@ -1365,15 +1473,18 @@ namespace
     target->FillRectangle(D2D1::RectF(0, 0, W, H), brush);
     // the loop.  With the storms' motion known, the radar moves on all through
     // a picture's time (true in-between pictures); without it, it fades into
-    // the next in the last part.  From the newest back to the oldest: a cut.
-    const bool moving = showRadar && !motion.vx.empty() && motionMap && motion.view == currentView();
+    // the next in the last part.  The clouds move too once their motion is
+    // known; until then they step.  From the newest back to the oldest: a cut.
+    const bool moving = showRadar && motionReady(RadarMotion);
+    const bool advancing = playing && frame < FrameCount - 1 && frameLoaded(frame + 1);
+    const ULONGLONG held = GetTickCount64() - frameShownAt;
+    const float along = advancing ? std::min(1.0f, (float) held / FrameMs) : 0;   // (the moving layers' t)
     int next = frame;
     float t = 0;
-    if (playing && frame < FrameCount - 1 && frameLoaded(frame + 1)) {
-      const ULONGLONG held = GetTickCount64() - frameShownAt;
+    if (advancing) {
       if (moving) {
         next = frame + 1;
-        t = std::min(1.0f, (float) held / FrameMs);
+        t = along;
       }
       else if (held > FrameMs - FadeMs) {
         next = frame + 1;
@@ -1381,8 +1492,10 @@ namespace
         t = t * t * (3 - 2 * t);                        // (eased at both ends)
       }
     }
-    if (showClouds) drawWeather(satLayer(frame), satLayer(frame), 0, SatMaxZoom, 0.92f);   // (clouds step, as they are)
-    if (showRadar && !(moving && next != frame && drawRadarMoving(frame, next, t, radarOpacity)))
+    if (showClouds && !(advancing && cloudPair(frame) &&
+                        drawMoving(CloudMotion, satLayer(frame), satLayer(frame + 1), SatMaxZoom, along, 0.92f)))
+      drawWeather(satLayer(frame), satLayer(frame), 0, SatMaxZoom, 0.92f);
+    if (showRadar && !(moving && next != frame && drawMoving(RadarMotion, radarLayer(frame), radarLayer(next), RadarMaxZoom, t, radarOpacity)))
       drawWeather(radarLayer(frame), radarLayer(next), t, RadarMaxZoom, radarOpacity);
     drawAlerts();
     if (home.set) drawPin(home.lat, home.lon, 0x2E86DE);
@@ -1561,16 +1674,19 @@ namespace
       }
       case WM_TIMER: {
         const ULONGLONG now = GetTickCount64();
-        // the radar's motion: worked out once the view has been still a moment and every frame is here
+        // the radar's and the clouds' motion: worked out once the view has been still a moment and every frame is here
         {
           View v = currentView();
           if (!(v == lastView)) {
             lastView = v;
             viewSteadySince = now;
-            if (!motion.vx.empty() || motionRunning) dropMotion();
+            dropMotion();
           }
-          if (showRadar && motion.vx.empty() && !motionRunning && now - viewSteadySince > 400 && !radarValid.empty() && radarLoaded())
-            startMotion();
+          if (now - viewSteadySince > 400 && !radarValid.empty()) {
+            const Mover & r = movers[RadarMotion], & c = movers[CloudMotion];
+            if (showRadar && r.field.vx.empty() && !r.running && radarLoaded()) startMotion(RadarMotion);
+            if (showClouds && c.field.vx.empty() && !c.running && cloudsLoaded()) startMotion(CloudMotion);
+          }
         }
         if (playing) InvalidateRect(hwnd, nullptr, FALSE);    // (the fade moves on every tick)
         if (playing && now - frameShownAt >= (frame == FrameCount - 1 ? LastFrameMs : FrameMs)) {

@@ -15,7 +15,8 @@ its own settings file.
   pictures, so rain moves across the map instead of jumping every 5 minutes.
   When zoomed in, the radar is smoothed rather than shown as blocky squares.
 - **Satellite clouds.** NOAA GOES infrared imagery, day and night, as
-  see-through clouds over the map.
+  see-through clouds over the map. They move smoothly too, with a motion of
+  their own (clouds ride the winds higher up than the storms below).
 - **Warnings.** NWS tornado, severe thunderstorm, flash flood and other
   storm-based warnings drawn on the map; click one for its full text.
 - **Forecasts.** Current conditions from the nearest weather station, the next

@@ -2,3 +2,4 @@ build/
 res/icon-preview.png
 *.user
 .vs/
+release/

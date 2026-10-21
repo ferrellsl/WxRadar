@@ -55,7 +55,7 @@ territories, which is what the National Weather Service serves.
 | Place search | OpenStreetMap [Nominatim](https://nominatim.org/) |
 
 None of these need an account or a key. WxRadar identifies itself to them as
-`WxRadar/1.0` with a link to this page, as they ask; it sends them only what
+`WxRadar/1.1` with a link to this page, as they ask; it sends them only what
 it needs (a map area, or a point for a forecast or search).
 
 **Map tiles.** By default the map comes from OpenStreetMap's own tile server,

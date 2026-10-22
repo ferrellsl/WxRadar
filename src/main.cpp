@@ -98,10 +98,11 @@ namespace
     bool pending = false;
     ULONGLONG failedAt = 0;
     ULONGLONG used = 0;
+    unsigned request = 0;                    // the newest request for it (older answers are ignored)
     std::vector<uint8_t> strength;           // for working out the motion: radar 64 x 64, clouds 128 x 128
   };
   std::unordered_map<uint64_t, Tile> tiles;   // key: layer, z, x, y
-  int radarEpoch = 0;                         // bumped when new radar pictures arrive (old tiles are dropped)
+  unsigned tileRequests = 0;
 
   // radar
   std::string radarValid;                  // ISO time of the newest picture
@@ -337,14 +338,12 @@ namespace
       if ((it->first >> 56) != 0) { dropTile(it->second); it = tiles.erase(it); }
       else ++it;
     }
-    ++radarEpoch;
   }
 
   void dropAllTiles()
   {
     for (auto & t : tiles) dropTile(t.second);
     tiles.clear();
-    ++radarEpoch;
   }
 
   void trimTiles()
@@ -404,13 +403,14 @@ namespace
                    st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, z, x, y);
     }
 
-    const int epoch = radarEpoch;
-    net::getImage(url, cache, age, [key, layer, epoch](net::Result & r) {
+    // (a tile dropped and asked for again - new radar or satellite times - is a
+    // new request: the old one's answer, if it comes after, is not this tile's)
+    const unsigned request = t.request = ++tileRequests;
+    net::getImage(url, cache, age, [key, layer, request](net::Result & r) {
       auto it = tiles.find(key);
-      if (it == tiles.end()) return;                          // (dropped meanwhile)
+      if (it == tiles.end() || it->second.request != request) return;   // (dropped meanwhile)
       Tile & t = it->second;
       t.pending = false;
-      if (layer != 0 && epoch != radarEpoch) { tiles.erase(it); return; }   // (an older radar picture)
       if (r.status == 0 && r.pixels.empty()) return;          // (dropped from the queue: asked again if still needed)
       if (!r.ok() || r.pixels.empty() || !target) { t.failedAt = GetTickCount64(); return; }
       D2D1_BITMAP_PROPERTIES props = D2D1::BitmapProperties(D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
@@ -1691,6 +1691,11 @@ namespace
         if (playing) InvalidateRect(hwnd, nullptr, FALSE);    // (the fade moves on every tick)
         if (playing && now - frameShownAt >= (frame == FrameCount - 1 ? LastFrameMs : FrameMs)) {
           int next = (frame + 1) % FrameCount;
+          if (!frameLoaded(next)) {
+            // (anything of it missing is asked for again: nothing is left out for good)
+            if (showClouds && !satFrame[next].empty()) requestLayer(satLayer(next), SatMaxZoom);
+            if (showRadar) requestLayer(radarLayer(next), RadarMaxZoom);
+          }
           if (frameLoaded(next) || now - frameShownAt > 3000) {    // (wait for a frame, a while)
             frame = next;
             frameShownAt = now;

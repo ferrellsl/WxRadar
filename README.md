@@ -37,7 +37,10 @@ It is a single program with no installer and no runtime to install (Windows
   opacity and more.
 - Click a warning on the map, or an alert in the side panel, to read it.
 - Keys: **Space** play or pause, **←** **→** step through the loop, **+** **−**
-  zoom, **Home** go home, **F5** refresh.
+  zoom, **Home** go home, **D** dark mode, **F5** refresh.
+- **Dark mode** (right-click menu, or **D**) turns the map dark for use at
+  night: land goes near black, water dark blue and the labels light, so the
+  radar stands out. The first time, it follows Windows' app theme.
 
 On first start WxRadar asks Windows where you are (only if Windows location is
 turned on) to set your home; you can also set it with a right-click or the

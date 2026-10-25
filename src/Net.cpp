@@ -17,7 +17,7 @@ namespace net
   namespace
   {
     // Who we are, as the NWS and OpenStreetMap ask every program to say.
-    const wchar_t * const UserAgent = L"WxRadar/1.1 (Windows weather radar viewer; +https://github.com/ferrellsl/WxRadar)";
+    const wchar_t * const UserAgent = L"WxRadar/1.2 (Windows weather radar viewer; +https://github.com/ferrellsl/WxRadar)";
 
     struct Job
     {

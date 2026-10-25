@@ -12,7 +12,7 @@ set_source_files_properties(src/Location.cpp PROPERTIES COMPILE_OPTIONS "/permis
 add_executable(WxRadar WIN32
   src/main.cpp src/Net.cpp src/Net.h src/Json.cpp src/Json.h src/Nws.cpp src/Nws.h
   src/Location.cpp src/Location.h res/WxRadar.rc)
-target_link_libraries(WxRadar PRIVATE d2d1 dwrite dxguid winhttp windowscodecs ole32 shell32 windowsapp)
+target_link_libraries(WxRadar PRIVATE d2d1 dwrite dxguid winhttp windowscodecs ole32 shell32 windowsapp dwmapi)
 target_compile_definitions(WxRadar PRIVATE UNICODE _UNICODE _CRT_SECURE_NO_WARNINGS)
 target_compile_options(WxRadar PRIVATE /W3 /utf-8)
 # (the manifest is in the .rc: no second one from the linker)

@@ -26,6 +26,7 @@
 #include <shlobj.h>
 #include <d2d1_1.h>
 #include <d2d1effects.h>
+#include <dwmapi.h>
 #include <dwrite.h>
 
 #include <algorithm>
@@ -113,6 +114,11 @@ namespace
   float radarOpacity = 0.75f;
   ULONGLONG radarCheckedAt = 0;
   bool showRadar = true;
+
+  // dark mode: the map's tiles turned dark (their lightness flipped, their colors kept),
+  // a dark search box and title bar (the panel and the boxes on the map are always dark)
+  bool darkMode = false;
+  HBRUSH darkEditBrush = nullptr;
 
   // clouds: the satellite pictures' times (nowCOAST), and the one nearest each radar frame
   bool showClouds = false;
@@ -297,6 +303,7 @@ namespace
     put(L"ShowAlerts", showAlerts ? L"1" : L"0");
     put(L"ShowRadar", showRadar ? L"1" : L"0");
     put(L"ShowClouds", showClouds ? L"1" : L"0");
+    put(L"DarkMode", darkMode ? L"1" : L"0");
     WINDOWPLACEMENT wp = { sizeof(wp) };
     if (GetWindowPlacement(window, &wp)) {
       const RECT & r = wp.rcNormalPosition;
@@ -312,6 +319,26 @@ namespace
   }
 
   // ------------------------------------------------------------- tiles
+  // A map tile for dark mode (BGRA, premultiplied).  Its lightness is turned
+  // around and its hue and saturation kept - each channel moved by the same
+  // amount, so that the brightest and darkest channels swap places (land goes
+  // near black, water dark blue, parks dark green, labels light) - then the
+  // contrast is softened, so the labels don't glare and the radar stands out.
+  static void darken(std::vector<uint8_t> & pixels)
+  {
+    for (size_t i = 0; i + 3 < pixels.size(); i += 4) {
+      uint8_t * p = &pixels[i];
+      const int a = p[3];
+      if (a == 0) continue;
+      const int hi = std::max(p[0], std::max(p[1], p[2])), lo = std::min(p[0], std::min(p[1], p[2]));
+      const int shift = a - hi - lo;
+      for (int c = 0; c < 3; ++c) {
+        const int flipped = p[c] + shift;                   // (0..a)
+        p[c] = (uint8_t) std::min(a, (24 * a + 255 / 2) / 255 + flipped * 150 / 255);
+      }
+    }
+  }
+
   uint64_t tileKey(int layer, int z, int x, int y)
   {
     return ((uint64_t) layer << 56) | ((uint64_t) z << 50) | ((uint64_t) x << 25) | (uint64_t) y;
@@ -433,6 +460,8 @@ namespace
             t.strength[(size_t) cy * side + cx] = (uint8_t) (sum / (k * k));
           }
       }
+      if (layer == 0 && darkMode)
+        darken(r.pixels);
       if (SUCCEEDED(target->CreateBitmap(D2D1::SizeU(r.width, r.height), r.pixels.data(), r.width * 4, props, &t.bitmap)))
         InvalidateRect(window, nullptr, FALSE);
       else
@@ -1446,6 +1475,21 @@ namespace
     if (target) { target->Release(); target = nullptr; }
   }
 
+  void setDarkMode(bool on)
+  {
+    darkMode = on;
+    // the map's tiles again, from the disk cache, turned to the new look
+    for (auto it = tiles.begin(); it != tiles.end();)
+      if ((it->first >> 56) == 0) { dropTile(it->second); it = tiles.erase(it); }
+      else ++it;
+    BOOL dark = on;
+    DwmSetWindowAttribute(window, 20 /* DWMWA_USE_IMMERSIVE_DARK_MODE */, &dark, sizeof(dark));
+    if (searchBox) InvalidateRect(searchBox, nullptr, TRUE);
+    requestView();
+    InvalidateRect(window, nullptr, FALSE);
+    saveSettings();
+  }
+
   bool makeDevice()
   {
     if (target) return true;
@@ -1464,13 +1508,15 @@ namespace
   {
     if (!makeDevice()) return;
     target->BeginDraw();
-    target->Clear(rgb(0xAAD3DF));                       // (the map's sea, while tiles come)
+    target->Clear(rgb(darkMode ? 0x1E2A33 : 0xAAD3DF)); // (the map's sea, while tiles come)
     const float W = mapWidth(), H = mapHeight();
     target->PushAxisAlignedClip(D2D1::RectF(0, 0, W, H), D2D1_ANTIALIAS_MODE_ALIASED);
     drawLayer(0, MapMaxZoom, 1.0f);
-    // (darken the map a little, so the radar's colors stand out)
-    brush->SetColor(rgb(0x000000, 0.12f));
-    target->FillRectangle(D2D1::RectF(0, 0, W, H), brush);
+    // (darken the map a little, so the radar's colors stand out; a dark map already does)
+    if (!darkMode) {
+      brush->SetColor(rgb(0x000000, 0.12f));
+      target->FillRectangle(D2D1::RectF(0, 0, W, H), brush);
+    }
     // the loop.  With the storms' motion known, the radar moves on all through
     // a picture's time (true in-between pictures); without it, it fades into
     // the next in the last part.  The clouds move too once their motion is
@@ -1564,7 +1610,7 @@ namespace
     MessageBoxW(window, body.c_str(), wide(a.event).c_str(), MB_OK | (a.severity == "Extreme" || a.severity == "Severe" ? MB_ICONWARNING : MB_ICONINFORMATION));
   }
 
-  enum { CmdForecastHere = 100, CmdHomeHere, CmdGoHome, CmdAlerts, CmdOpacity50, CmdOpacity75, CmdOpacity100, CmdRefresh, CmdAbout };
+  enum { CmdForecastHere = 100, CmdHomeHere, CmdGoHome, CmdAlerts, CmdOpacity50, CmdOpacity75, CmdOpacity100, CmdRefresh, CmdAbout, CmdDark };
 
   void contextMenu(int sx, int sy)
   {
@@ -1581,6 +1627,7 @@ namespace
     AppendMenuW(opacity, MF_STRING | (radarOpacity >= 0.6f && radarOpacity < 0.9f ? MF_CHECKED : 0), CmdOpacity75, L"75%");
     AppendMenuW(opacity, MF_STRING | (radarOpacity >= 0.9f ? MF_CHECKED : 0), CmdOpacity100, L"100%");
     AppendMenuW(menu, MF_POPUP, (UINT_PTR) opacity, L"Radar opacity");
+    AppendMenuW(menu, MF_STRING | (darkMode ? MF_CHECKED : 0), CmdDark, L"Dark mode\tD");
     AppendMenuW(menu, MF_STRING, CmdRefresh, L"Refresh now\tF5");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, CmdAbout, L"About WxRadar...");
@@ -1593,6 +1640,7 @@ namespace
       case CmdHomeHere: setHome(latOf(wy), lonOf(wx), ""); loadForecast(home.lat, home.lon, ""); break;
       case CmdGoHome: centerOn(home.lat, home.lon, std::max(zoom, 8.0)); loadForecast(home.lat, home.lon, home.name); break;
       case CmdAlerts: showAlerts = !showAlerts; saveSettings(); break;
+      case CmdDark: setDarkMode(!darkMode); break;
       case CmdOpacity50: radarOpacity = 0.5f; saveSettings(); break;
       case CmdOpacity75: radarOpacity = 0.75f; saveSettings(); break;
       case CmdOpacity100: radarOpacity = 1.0f; saveSettings(); break;
@@ -1646,6 +1694,15 @@ namespace
         SetWindowPos(hwnd, nullptr, r->left, r->top, r->right - r->left, r->bottom - r->top, SWP_NOZORDER | SWP_NOACTIVATE);
         return 0;
       }
+      case WM_CTLCOLOREDIT:
+        if (darkMode && (HWND) lParam == searchBox) {
+          HDC dc = (HDC) wParam;
+          SetTextColor(dc, RGB(0xE8, 0xEE, 0xF4));
+          SetBkColor(dc, RGB(0x24, 0x30, 0x3C));
+          if (!darkEditBrush) darkEditBrush = CreateSolidBrush(RGB(0x24, 0x30, 0x3C));
+          return (LRESULT) darkEditBrush;
+        }
+        break;
       case WM_PAINT: {
         PAINTSTRUCT ps;
         BeginPaint(hwnd, &ps);
@@ -1794,6 +1851,7 @@ namespace
           case VK_RIGHT: playing = false; frame = (frame + 1) % FrameCount; break;
           case VK_ADD: case VK_OEM_PLUS: zoomAt(mapWidth() / 2, mapHeight() / 2, 1); break;
           case VK_SUBTRACT: case VK_OEM_MINUS: zoomAt(mapWidth() / 2, mapHeight() / 2, -1); break;
+          case 'D': setDarkMode(!darkMode); break;
           case VK_HOME: if (home.set) { centerOn(home.lat, home.lon, std::max(zoom, 8.0)); loadForecast(home.lat, home.lon, home.name); } break;
           case VK_F5:
             dropRadarTiles();
@@ -1898,6 +1956,13 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show)
   showAlerts = setting(L"ShowAlerts", L"1") != L"0";
   showRadar = setting(L"ShowRadar", L"1") != L"0";
   showClouds = setting(L"ShowClouds", L"0") != L"0";
+  {
+    // (dark mode: as last chosen; the first time, as Windows' apps are set)
+    DWORD light = 1, size = sizeof(light);
+    RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+                 L"AppsUseLightTheme", RRF_RT_REG_DWORD, nullptr, &light, &size);
+    darkMode = setting(L"DarkMode", light ? L"0" : L"1") != L"0";
+  }
   mapTiles = setting(L"MapTiles", OsmTiles);
   if (!setting(L"MapCredit").empty()) mapCredit = setting(L"MapCredit");
 
@@ -1907,6 +1972,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show)
   HWND hwnd = CreateWindowExW(0, L"WxRadar", L"WxRadar", WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
                               x, y, w, hgt, nullptr, nullptr, instance, nullptr);
   ui = GetDpiForWindow(hwnd) / 96.0f;
+  if (darkMode) {
+    BOOL dark = TRUE;
+    DwmSetWindowAttribute(hwnd, 20 /* DWMWA_USE_IMMERSIVE_DARK_MODE */, &dark, sizeof(dark));
+  }
   if (x == CW_USEDEFAULT) {
     RECT r; GetWindowRect(hwnd, &r);
     SetWindowPos(hwnd, nullptr, 0, 0, (int) (1400 * ui), (int) (880 * ui), SWP_NOMOVE | SWP_NOZORDER);

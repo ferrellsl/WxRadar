@@ -29,7 +29,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
- * WxRadar: one map on a screen - the phone's, or the car's - drawn onto any Canvas (a port
+ * WxRadar: the map - drawn onto a Canvas (a port
  * of the Windows app's map drawing, loop and motion).
  *
  * The map: Web Mercator ("world" coordinates 0..256 across the whole Earth at zoom 0), zoom
@@ -43,29 +43,22 @@ public final class MapRenderer implements Weather.Viewer {
     /** Tiles come out about 170 dp across (256 / 1.5): the size they have on Windows at 150%. */
     static final double TILE_DETAIL = Math.log(1.5) / Math.log(2);
 
-    public enum Style { PHONE, CAR }
-
     private final Weather wx;
-    private final Style style;
     private final Runnable invalidate;
     public float ui = 1;                        // pixels per dp
 
     // the view
     public double camX = 128, camY = 128, zoom = 4;
     public int width, height;
-    /** The part of the surface not covered by anything (the car's own controls, panels). */
-    public final Rect focus = new Rect();
 
     // the loop
     public int frame = Weather.FRAME_COUNT - 1;  // shown now: 0 oldest .. FRAME_COUNT-1 newest
     public boolean playing = true;
     private long frameShownAt;
-    /** False: the newest picture only, still (the car while driving: no animation). */
-    public boolean animationAllowed = true;
     public boolean darkMap;
     public String status = "";
 
-    // pins: home, and the point picked (phone) or where the car is
+    // pins: home, and the point the forecast is for
     public Weather.Place pinHome, pinPicked;
     public int pinPickedColor = 0xE67E22;
 
@@ -87,9 +80,8 @@ public final class MapRenderer implements Weather.Viewer {
     private final Rect srcRect = new Rect();
     private final RectF dstRect = new RectF();
 
-    public MapRenderer(Weather wx, Style style, Runnable invalidate) {
+    public MapRenderer(Weather wx, Runnable invalidate) {
         this.wx = wx;
-        this.style = style;
         this.invalidate = invalidate;
         textPaint.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
     }
@@ -112,8 +104,8 @@ public final class MapRenderer implements Weather.Viewer {
     public static double latOf(double wy) { double n = Math.PI - 2 * Math.PI * wy / 256.0; return Math.toDegrees(Math.atan(Math.sinh(n))); }
 
     public double scale() { return Math.pow(2.0, zoom) * ui; }      // screen pixels per world unit
-    private float centerX() { return focus.isEmpty() ? width / 2f : focus.exactCenterX(); }
-    private float centerY() { return focus.isEmpty() ? height / 2f : focus.exactCenterY(); }
+    private float centerX() { return width / 2f; }
+    private float centerY() { return height / 2f; }
 
     public float screenX(double wx) { return (float) (centerX() + (wx - camX) * scale()); }
     public float screenY(double wy) { return (float) (centerY() + (wy - camY) * scale()); }
@@ -181,8 +173,7 @@ public final class MapRenderer implements Weather.Viewer {
         if (width <= 0 || height <= 0) return;
         lastRequestAt = SystemClock.uptimeMillis();
         Net.dropWaitingImages(this);
-        boolean loop = animationAllowed;
-        for (int f = 0; f < Weather.FRAME_COUNT && loop; ++f)
+        for (int f = 0; f < Weather.FRAME_COUNT; ++f)
             if (f != frame) {
                 if (wx.showClouds) requestLayer(Weather.satLayer(f), Weather.SAT_MAX_ZOOM);
                 if (wx.showRadar) requestLayer(Weather.radarLayer(f), Weather.RADAR_MAX_ZOOM);
@@ -521,15 +512,10 @@ public final class MapRenderer implements Weather.Viewer {
             requestViewSoon = false;
             requestView();
         }
-        if (animationAllowed && now - viewSteadySince > 400 && wx.radarValid != 0) {
+        if (now - viewSteadySince > 400 && wx.radarValid != 0) {
             Mover r = movers[Motion.RADAR], c = movers[Motion.CLOUDS];
             if (wx.showRadar && r.field == null && !r.running && radarLoaded()) startMotion(Motion.RADAR);
             if (wx.showClouds && c.field == null && !c.running && cloudsLoaded()) startMotion(Motion.CLOUDS);
-        }
-        if (!animationAllowed) {
-            boolean redraw = frame != Weather.FRAME_COUNT - 1;
-            frame = Weather.FRAME_COUNT - 1;
-            return redraw;
         }
         if (playing && now - frameShownAt >= (frame == Weather.FRAME_COUNT - 1 ? LAST_FRAME_MS : FRAME_MS)) {
             int next = (frame + 1) % Weather.FRAME_COUNT;
@@ -591,7 +577,7 @@ public final class MapRenderer implements Weather.Viewer {
         // step.  From the newest back to the oldest: a cut.
         final int last = Weather.FRAME_COUNT - 1;
         final boolean moving = wx.showRadar && motionReady(Motion.RADAR);
-        final boolean advancing = animationAllowed && playing && frame < last && frameLoaded(frame + 1);
+        final boolean advancing = playing && frame < last && frameLoaded(frame + 1);
         final long held = SystemClock.uptimeMillis() - frameShownAt;
         final float along = advancing ? Math.min(1.0f, (float) held / FRAME_MS) : 0;
         int next = frame;
@@ -616,8 +602,7 @@ public final class MapRenderer implements Weather.Viewer {
         if (pinHome != null && pinHome.set) drawPin(c, pinHome.lat, pinHome.lon, 0x2E86DE);
         if (pinPicked != null && pinPicked.set && !(pinHome != null && pinHome.set && pinPicked.lat == pinHome.lat && pinPicked.lon == pinHome.lon))
             drawPin(c, pinPicked.lat, pinPicked.lon, pinPickedColor);
-        if (style == Style.PHONE) drawPhoneOverlay(c);
-        else drawCarOverlay(c);
+        drawOverlay(c);
     }
 
     private static int argb(int rgb, float a) {
@@ -708,22 +693,18 @@ public final class MapRenderer implements Weather.Viewer {
     }
 
     /** The radar's time, the loop's state and the legend, in a box at (bx, by). */
-    private float drawLoopBox(Canvas c, float bx, float by, float bw, boolean controls) {
-        final float bh = (controls ? 88 : 72) * ui;
+    private float drawLoopBox(Canvas c, float bx, float by, float bw) {
+        final float bh = 88 * ui;
         box(c, bx, by, bx + bw, by + bh);
         String when = wx.radarValid == 0 ? "Radar: loading..." : "Radar " + clock(wx.frameTime(frame));
         font(13.5f, true);
         text(c, when, bx + 10 * ui, by + 7 * ui, 0xFFFFFF, Paint.Align.LEFT);
         float y = by + 28 * ui;
-        if (controls) {
-            String state = playing ? "▶  playing  (tap to pause)" : "❚❚  paused  (tap to play)";
-            if (smoothMotion()) state = (playing ? "▶  playing" : "❚❚  paused") + "   • smooth motion";
-            font(11.5f, false);
-            text(c, state, bx + 10 * ui, y, 0xC8D6E5, Paint.Align.LEFT);
-            y += 20 * ui;
-        } else {
-            y += 0;
-        }
+        String state = playing ? "▶  playing  (tap to pause)" : "❚❚  paused  (tap to play)";
+        if (smoothMotion()) state = (playing ? "▶  playing" : "❚❚  paused") + "   • smooth motion";
+        font(11.5f, false);
+        text(c, state, bx + 10 * ui, y, 0xC8D6E5, Paint.Align.LEFT);
+        y += 20 * ui;
         // the loop's frames, as a row of ticks
         float tx = bx + 10 * ui, tw = (bw - 20 * ui) / Weather.FRAME_COUNT;
         for (int f = 0; f < Weather.FRAME_COUNT; ++f) {
@@ -735,7 +716,7 @@ public final class MapRenderer implements Weather.Viewer {
         return by + bh;
     }
 
-    private void drawPhoneOverlay(Canvas c) {
+    private void drawOverlay(Canvas c) {
         final float W = width, H = height;
         hits.clear();
         final boolean wide = W >= 480 * ui;
@@ -744,7 +725,7 @@ public final class MapRenderer implements Weather.Viewer {
         final float buttonW = 44 * ui;
         // the radar's time and the loop's state, top left
         float bw = Math.min(230 * ui, W - 20 * ui - (wide ? lw + 10 * ui : buttonW + 10 * ui));
-        float loopBottom = drawLoopBox(c, 10 * ui, 10 * ui, bw, true);
+        float loopBottom = drawLoopBox(c, 10 * ui, 10 * ui, bw);
         RectF loopBox = new RectF(10 * ui, 10 * ui, 10 * ui + bw, loopBottom);
         hits.add(new Hit(new RectF(framesBar), HIT_FRAMES));
         hits.add(new Hit(loopBox, HIT_PLAY));
@@ -849,22 +830,6 @@ public final class MapRenderer implements Weather.Viewer {
             c.drawPath(path, paint);
         }
         paint.setStyle(Paint.Style.FILL);
-    }
-
-    /** The car: the time and the legend in the visible area's top left, the credits at the bottom. */
-    private void drawCarOverlay(Canvas c) {
-        Rect area = focus.isEmpty() ? new Rect(0, 0, width, height) : focus;
-        float bw = Math.min(220 * ui, area.width() - 20 * ui);
-        if (bw > 120 * ui) {
-            float bottom = drawLoopBox(c, area.left + 10 * ui, area.top + 10 * ui, bw, false);
-            if (!status.isEmpty()) {
-                font(11.5f, false);
-                float tw = Math.min(textPaint.measureText(status), bw - 12 * ui);
-                box(c, area.left + 10 * ui, bottom + 6 * ui, area.left + 22 * ui + tw, bottom + 28 * ui);
-                text(c, status, area.left + 16 * ui, bottom + 10 * ui, 0xFFFFFF, Paint.Align.LEFT);
-            }
-        }
-        drawCredits(c, width, area.bottom, false);
     }
 
     /** The hit (a control on the map) at a point, or 0. */

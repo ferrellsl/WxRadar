@@ -4,7 +4,7 @@ import java.text.DateFormat;
 import java.util.Date;
 import java.util.Locale;
 
-/** WxRadar: how the NWS's numbers and words are put on the screen (phone and car alike). */
+/** WxRadar: how the NWS's numbers and words are put on the screen. */
 public final class Words {
     private Words() { }
 

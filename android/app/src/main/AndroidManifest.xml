@@ -1,14 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET" />
-    <!-- where you are: your home the first time, and the car's map and forecast -->
+    <!-- where you are: your home, the first time -->
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
-    <!-- Android Auto: a weather app that draws its own map -->
-    <uses-permission android:name="androidx.car.app.MAP_TEMPLATES" />
-    <uses-permission android:name="androidx.car.app.ACCESS_SURFACE" />
-    <!-- the car's speed: the radar loop plays on the car's screen only while parked -->
-    <uses-permission android:name="com.google.android.gms.permission.CAR_SPEED" />
 
     <application
         android:label="@string/app_name"
@@ -26,19 +21,5 @@
             </intent-filter>
         </activity>
 
-        <service
-            android:name=".car.CarService"
-            android:exported="true">
-            <intent-filter>
-                <action android:name="androidx.car.app.CarAppService" />
-                <category android:name="androidx.car.app.category.WEATHER" />
-            </intent-filter>
-        </service>
-        <meta-data
-            android:name="androidx.car.app.minCarApiLevel"
-            android:value="7" />
-        <meta-data
-            android:name="com.google.android.gms.car.application"
-            android:resource="@xml/automotive_app_desc" />
     </application>
 </manifest>

@@ -1,7 +1,7 @@
 import java.util.Properties
 
 // WxRadar for Android: the Windows app's radar loop, clouds, warnings and forecasts on a
-// phone or tablet, and on the car's screen through Android Auto.
+// phone or tablet.
 plugins {
     id("com.android.application")
 }
@@ -47,7 +47,5 @@ android {
 }
 
 dependencies {
-    implementation("androidx.car.app:app:1.7.0")
-    implementation("androidx.car.app:app-projected:1.7.0")     // (the car's speed, on Android Auto)
     testImplementation("junit:junit:4.13.2")
 }

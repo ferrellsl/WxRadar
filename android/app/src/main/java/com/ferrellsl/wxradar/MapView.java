@@ -26,7 +26,7 @@ public final class MapView extends View {
     public MapView(Context context) {
         super(context);
         wx = Weather.get(context);
-        map = new MapRenderer(wx, MapRenderer.Style.PHONE, this::invalidate);
+        map = new MapRenderer(wx, this::invalidate);
         map.ui = getResources().getDisplayMetrics().density;
         setFocusable(true);
         setContentDescription("Weather radar map");

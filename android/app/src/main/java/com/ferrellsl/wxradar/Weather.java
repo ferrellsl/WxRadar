@@ -22,7 +22,7 @@ import java.util.Locale;
 import java.util.Map;
 
 /**
- * WxRadar: what the phone's screen and the car's screen share - the radar's and the
+ * WxRadar: the shared state behind the map and the panel - the radar's and the
  * satellite's times, the national alerts, the map tiles, home and the settings - and the
  * housekeeping that keeps them fresh while anything is shown.
  *
@@ -106,7 +106,7 @@ public final class Weather {
     public final Map<Long, Tile> tiles = new HashMap<>();
     private int tileRequests;
 
-    /** What is shown (the phone's map, the car's): told when something new can be drawn. */
+    /** What is shown (the map): told when something new can be drawn. */
     public interface Viewer {
         void weatherChanged();
         /** The satellite clouds are wanted (so their times are kept fresh). */

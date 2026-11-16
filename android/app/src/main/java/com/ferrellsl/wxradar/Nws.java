@@ -136,7 +136,7 @@ public final class Nws {
     /**
      * Starts loading everything for a point; update is called each time a part arrives (on
      * the main thread), with the forecast so far.  A newer call makes the older one's late
-     * answers be ignored (per slot: the phone's panel and the car's screen each have one).
+     * answers be ignored (per slot: each screen that shows a forecast has its own).
      */
     public static void loadForecast(String slot, double lat, double lon, ForecastUpdate update) {
         Integer last = generations.get(slot);

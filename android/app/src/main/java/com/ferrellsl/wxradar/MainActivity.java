@@ -42,7 +42,8 @@ public final class MainActivity extends Activity implements MapView.Listener {
     // the panel's colors (as the Windows app's)
     static final int PANEL = 0xFF18222D, BAR = 0xFF101820, TEXT = 0xFFC8D6E5, DIM = 0xFF8FA3B8, WHITE = 0xFFFFFFFF,
             RULE = 0xFF33475B, RAIN = 0xFF7FC8FF, ERROR = 0xFFFFB4A2, NIGHT = 0xFFB8C6D6;
-    static final int PANEL_DP = 360;
+    static final int PANEL_DP = 360;              // the panel's width at first (wide screens)
+    static final int PANEL_MIN_DP = 240, MAP_MIN_DP = 280;
 
     private Weather wx;
     private MapView mapView;
@@ -52,7 +53,10 @@ public final class MainActivity extends Activity implements MapView.Listener {
     private LinearLayout root, content, panel, header, body;
     private ScrollView bodyScroll;
     private TextView chevron;
-    private boolean wide, panelOpen;
+    private boolean wide, panelOpen, panelHidden;
+    private int panelWidthDp;
+    private View divider;
+    private android.widget.ImageView panelButton;
 
     // the point the forecast is for
     private final Weather.Place picked = new Weather.Place();
@@ -68,6 +72,8 @@ public final class MainActivity extends Activity implements MapView.Listener {
         wx = Weather.get(this);
         SharedPreferences p = wx.prefs();
         panelOpen = p.getBoolean("panelOpen", true);
+        panelHidden = p.getBoolean("panelHidden", false);
+        panelWidthDp = p.getInt("panelWidth", PANEL_DP);
 
         root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
@@ -105,6 +111,14 @@ public final class MainActivity extends Activity implements MapView.Listener {
             return false;
         });
         bar.addView(search, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        panelButton = new android.widget.ImageView(this);
+        panelButton.setImageResource(R.drawable.ic_panel);
+        panelButton.setScaleType(android.widget.ImageView.ScaleType.CENTER);
+        TypedValue ripple = new TypedValue();
+        getTheme().resolveAttribute(android.R.attr.selectableItemBackgroundBorderless, ripple, true);
+        panelButton.setBackgroundResource(ripple.resourceId);
+        panelButton.setOnClickListener(v -> setPanelHidden(!panelHidden));
+        bar.addView(panelButton, new LinearLayout.LayoutParams(px(48), px(44)));
         TextView homeButton = barButton("⌂", "Go home");
         homeButton.setOnClickListener(v -> goHome());
         bar.addView(homeButton);
@@ -142,6 +156,7 @@ public final class MainActivity extends Activity implements MapView.Listener {
         bodyScroll.addView(body, new ScrollView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         panel.addView(bodyScroll, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
 
+        divider = new PanelDivider(this);
         content = new LinearLayout(this);
         root.addView(content, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
         content.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> {
@@ -239,21 +254,102 @@ public final class MainActivity extends Activity implements MapView.Listener {
             content.setOrientation(wide ? LinearLayout.HORIZONTAL : LinearLayout.VERTICAL);
             if (wide) {
                 content.addView(mapFrame, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1));
+                content.addView(divider, new LinearLayout.LayoutParams(px(14), ViewGroup.LayoutParams.MATCH_PARENT));
                 content.addView(panel, new LinearLayout.LayoutParams(px(PANEL_DP), ViewGroup.LayoutParams.MATCH_PARENT));
             } else {
                 content.addView(mapFrame, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
                 content.addView(panel, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
             }
         }
+        panel.setVisibility(panelHidden ? View.GONE : View.VISIBLE);
+        divider.setVisibility(wide && !panelHidden ? View.VISIBLE : View.GONE);
+        panelButton.setAlpha(panelHidden ? 0.55f : 1f);
+        panelButton.setContentDescription(panelHidden ? "Show the forecast" : "Hide the forecast");
+        LinearLayout.LayoutParams lp = (LinearLayout.LayoutParams) panel.getLayoutParams();
         if (!wide) {
-            LinearLayout.LayoutParams lp = (LinearLayout.LayoutParams) panel.getLayoutParams();
             lp.height = panelOpen ? Math.round(h * 0.45f) : ViewGroup.LayoutParams.WRAP_CONTENT;
-            panel.setLayoutParams(lp);
             bodyScroll.setVisibility(panelOpen ? View.VISIBLE : View.GONE);
         } else {
+            lp.width = clampPanel(px(panelWidthDp), w);
             bodyScroll.setVisibility(View.VISIBLE);
         }
+        panel.setLayoutParams(lp);
         fillHeader();
+    }
+
+    /** A panel width that leaves the map room (wide screens). */
+    private int clampPanel(int widthPx, int contentPx) {
+        int most = Math.max(px(PANEL_MIN_DP), contentPx - px(14) - px(MAP_MIN_DP));
+        return Math.max(px(PANEL_MIN_DP), Math.min(most, widthPx));
+    }
+
+    /** The forecast panel away (the map takes the whole width) or back. */
+    private void setPanelHidden(boolean hidden) {
+        panelHidden = hidden;
+        wx.prefs().edit().putBoolean("panelHidden", hidden).apply();
+        layoutPanel();
+    }
+
+    /** The panel back, open, to show a forecast just asked for. */
+    private void showPanel() {
+        if (!panelHidden && (wide || panelOpen)) return;
+        panelOpen = true;
+        wx.prefs().edit().putBoolean("panelOpen", true).apply();
+        setPanelHidden(false);
+    }
+
+    /**
+     * The handle between the map and the panel (wide screens): drag it to make the panel
+     * narrower or wider; dragged almost to the edge, the panel goes away (the top bar's
+     * panel button brings it back).
+     */
+    private final class PanelDivider extends View {
+        private final android.graphics.Paint grip = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+        private boolean dragging;
+
+        PanelDivider(Context c) {
+            super(c);
+            setBackgroundColor(0xFF0B1118);
+            setContentDescription("Drag to resize the forecast");
+        }
+
+        @Override protected void onDraw(android.graphics.Canvas c) {
+            float x = getWidth() / 2f, y = getHeight() / 2f;
+            grip.setColor(dragging ? 0xFF2E86DE : 0xFF5C7080);
+            c.drawRoundRect(x - dp(2), y - dp(22), x + dp(2), y + dp(22), dp(2), dp(2), grip);
+        }
+
+        @Override public boolean onTouchEvent(android.view.MotionEvent e) {
+            int[] at = new int[2];
+            content.getLocationOnScreen(at);
+            int right = at[0] + content.getWidth();
+            int width = Math.round(right - e.getRawX() - getWidth() / 2f);
+            switch (e.getActionMasked()) {
+                case android.view.MotionEvent.ACTION_DOWN:
+                    dragging = true;
+                    getParent().requestDisallowInterceptTouchEvent(true);
+                    invalidate();
+                    return true;
+                case android.view.MotionEvent.ACTION_MOVE: {
+                    LinearLayout.LayoutParams lp = (LinearLayout.LayoutParams) panel.getLayoutParams();
+                    lp.width = clampPanel(width, content.getWidth());
+                    panel.setLayoutParams(lp);
+                    return true;
+                }
+                case android.view.MotionEvent.ACTION_UP:
+                case android.view.MotionEvent.ACTION_CANCEL:
+                    dragging = false;
+                    invalidate();
+                    if (e.getActionMasked() == android.view.MotionEvent.ACTION_UP && width < px(PANEL_MIN_DP) - px(60)) {
+                        setPanelHidden(true);      // (dragged nearly off: away; its width stays as it was)
+                        return true;
+                    }
+                    panelWidthDp = Math.round(panel.getLayoutParams().width / getResources().getDisplayMetrics().density);
+                    wx.prefs().edit().putInt("panelWidth", panelWidthDp).apply();
+                    return true;
+            }
+            return super.onTouchEvent(e);
+        }
     }
 
     // ------------------------------------------------------------- the panel
@@ -460,7 +556,7 @@ public final class MainActivity extends Activity implements MapView.Listener {
             mapView.map.status = "";
             mapView.map.centerOn(lat, lon, Math.max(mapView.map.zoom, 9.0));
             loadForecast(lat, lon, "");
-            if (!wide && !panelOpen) { panelOpen = true; layoutPanel(); }
+            showPanel();
         });
     }
 
@@ -491,7 +587,7 @@ public final class MainActivity extends Activity implements MapView.Listener {
         switch (item.getItemId()) {
             case CMD_FORECAST_HERE:
                 loadForecast(menuLat, menuLon, "");
-                if (!wide && !panelOpen) { panelOpen = true; layoutPanel(); }
+                showPanel();
                 break;
             case CMD_HOME_HERE:
                 wx.setHome(menuLat, menuLon, "");

@@ -79,7 +79,8 @@ or later): the same radar loop with smooth motion (Android 13 and later; older
 versions cross-fade), satellite clouds, warnings, forecasts and search, with a
 dark map option. On a phone held upright the forecast is below the map (tap
 its header to hide or show it); on a tablet, a phone on its side or an
-unfolded phone it is beside the map.
+unfolded phone it is beside the map: drag the handle between them to give the
+map more room, or hide the forecast with the panel button in the top bar.
 
 - Drag to move, pinch or double-tap to zoom.
 - Tap the radar box to play or pause; slide along its row of ticks to step

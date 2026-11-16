@@ -72,6 +72,40 @@ MapTiles=https://your.tile.server/{z}/{x}/{y}.png
 MapCredit=Map © its owners
 ```
 
+## Android and Android Auto
+
+The `android` folder holds WxRadar for Android phones and tablets (Android 10
+or later): the same radar loop with smooth motion (Android 13 and later; older
+versions cross-fade), satellite clouds, warnings, forecasts and search, with a
+dark map option. On a phone held upright the forecast is below the map (tap
+its header to hide or show it); on a tablet, a phone on its side or an
+unfolded phone it is beside the map.
+
+- Drag to move, pinch or double-tap to zoom.
+- Tap the radar box to play or pause; slide along its row of ticks to step
+  through the loop.
+- Long-press the map for **Forecast here** and **Make this my home**.
+- The **⋮** menu has Go home, Make where I am my home, warnings, radar
+  opacity, Dark map, Refresh now and About.
+
+**Android Auto.** On the car's screen WxRadar shows the radar map beside the
+temperature now, the warnings in effect, the next hours and the next
+forecast periods, for where the car is (or your home). Pan and zoom with the
+car's map buttons; tap a warning to read it. Google's rules for weather apps
+in cars allow no animation while driving, so the loop plays only while the
+car is parked; while moving you see the newest radar picture.
+
+Because WxRadar is not from the Play Store, Android Auto lists it only after
+you turn on its developer settings (in Android Auto's settings, tap
+*Version* ten times), then in the developer settings tick *Unknown sources*.
+Android Auto runs only on phones (and tablets with a SIM slot).
+
+Building: Android Studio's JDK and the Android SDK, then in `android`:
+
+```
+gradlew assembleRelease
+```
+
 ## Your settings
 
 WxRadar keeps its settings (your home, the view, the layers) in

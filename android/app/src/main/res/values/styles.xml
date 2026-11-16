@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="WxRadar" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:colorPrimary">#101820</item>
+        <item name="android:colorPrimaryDark">#0B1118</item>
+        <item name="android:colorAccent">#2E86DE</item>
+        <item name="android:windowBackground">#101820</item>
+        <item name="android:navigationBarColor">#101820</item>
+        <item name="android:statusBarColor">#101820</item>
+    </style>
+</resources>

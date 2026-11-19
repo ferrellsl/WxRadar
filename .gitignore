@@ -3,3 +3,4 @@ res/icon-preview.png
 *.user
 .vs/
 release/
+build-x86/

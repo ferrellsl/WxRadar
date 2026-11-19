@@ -29,7 +29,8 @@ its own settings file.
 
 Download `WxRadar.exe` from the [Releases](../../releases) page and run it.
 It is a single program with no installer and no runtime to install (Windows
-10 or 11).
+10 or 11). For 32-bit Windows 10, download `WxRadar-x86.exe` (or the
+`win32` zip) instead.
 
 - Drag the map to move it; zoom with the mouse wheel, double-click, or the
   **+** / **−** buttons.
@@ -110,6 +111,8 @@ Visual Studio 2019 or later with the C++ desktop workload, and CMake:
 cmake -S . -B build -G "Visual Studio 16 2019" -A x64
 cmake --build build --config Release
 ```
+
+For the 32-bit build use `-A Win32` and another folder (`-B build-x86`).
 
 The program is `build\Release\WxRadar.exe`. It is plain C++17 with Win32,
 Direct2D, DirectWrite, WinHTTP and WIC, all part of Windows: no other
